@@ -58,9 +58,25 @@ async function collectFromAmc(dates) {
   const normalise = (text) => text.replaceAll('\\"', '"').replaceAll('\\\\', '\\');
   const jsonBlock = (text, start) => { const open = text.indexOf("{", start); if (open < 0) return null; let quote = false, escape = false, depth = 0; for (let i = open; i < text.length; i += 1) { const char = text[i]; if (quote) { if (escape) escape = false; else if (char === "\\") escape = true; else if (char === '"') quote = false; continue; } if (char === '"') quote = true; else if (char === "{") depth += 1; else if (char === "}" && --depth === 0) return text.slice(open, i + 1); } return null; };
   const fetchPage = async (url) => { const response = await fetch(url, { credentials: "same-origin" }); const text = await response.text(); if (!response.ok) throw new Error(`AMC request failed (${response.status}).`); if (blocked(text)) throw new Error("AMC_ACCESS_BLOCKED: AMC returned an access-control page."); return text; };
-  const idsOnListing = (html) => { const doc = new DOMParser().parseFromString(html, "text/html"); const ids = new Set(); for (const link of doc.querySelectorAll('a[href*="/showtimes/"][href$="/seats"]')) { let element = link, text = ""; for (let level = 0; level < 6 && element; level += 1, element = element.parentElement) text += ` ${element.textContent || ""}`; const id = link.getAttribute("href")?.match(/\/showtimes\/(\d+)\/seats/)?.[1]; if (id && /IMAX\s*70\s*MM/i.test(text)) ids.add(id); } return [...ids]; };
+  const idsOnListing = (html) => {
+    const doc = new DOMParser().parseFromString(html, "text/html");
+    const ids = new Set();
+    // AMC's listing links point to /showtimes/{id}; its seat page is a
+    // separate /showtimes/{id}/seats URL. The surrounding card carries format.
+    for (const link of doc.querySelectorAll('a[href*="/showtimes/"]')) {
+      // The closest labelled list item is the individual premium-format group.
+      // Looking all the way up to the theatre container incorrectly labels its
+      // separate plain-70mm performance as IMAX 70MM.
+      const group = link.closest('li[role="listitem"][aria-label]');
+      const text = `${group?.getAttribute("aria-label") || ""} ${group?.textContent || ""}`;
+      const id = link.getAttribute("href")?.match(/\/showtimes\/(\d+)(?:\/seats)?(?:[?#]|$)/)?.[1];
+      if (id && /IMAX\s*70\s*MM/i.test(text)) ids.add(id);
+    }
+    return [...ids];
+  };
   const parseSeatPage = (html, id) => { const text = normalise(html); const layoutText = jsonBlock(text, text.indexOf('"seatingLayout":')); if (!layoutText) throw new Error(`No seating layout for ${id}.`); const layout = JSON.parse(layoutText); const position = text.indexOf(`"showtimeId":${id}`); const around = text.slice(Math.max(0, position - 1200), position + 3500); const utc = around.match(/"showDateTimeUtc":"([^"]+)"/)?.[1]; if (!utc || !Array.isArray(layout.seats)) throw new Error(`No usable showtime data for ${id}.`); return { utc, rows: Number(layout.rows), columns: Number(layout.columns), seats: layout.seats.map((seat) => ({ available: Boolean(seat.available), row: Number(seat.row), column: Number(seat.column), name: String(seat.seatName ?? seat.name ?? ""), type: String(seat.type ?? "NotASeat") })) }; };
   const snapshot = { version: 1, source: "chrome_extension", checkedAt: new Date().toISOString(), showtimes: [], seatsByShowtime: {} };
   for (const listingDate of dates) { const listing = await fetchPage(`/movies/the-odyssey-76238/showtimes?date=${listingDate}`); for (const id of idsOnListing(listing)) { await wait(1400); const layout = parseSeatPage(await fetchPage(`/showtimes/${id}/seats`), id); snapshot.showtimes.push({ id: Number(id), listingDate, showDateTimeUtc: layout.utc, isSoldOut: false, purchaseUrl: `https://www.amctheatres.com/showtimes/${id}/seats` }); snapshot.seatsByShowtime[id] = { rows: layout.rows, columns: layout.columns, seats: layout.seats, checkedAt: new Date().toISOString() }; } await wait(1400); }
+  if (!snapshot.showtimes.length) throw new Error("No IMAX 70mm showtimes were found in AMC's rendered listings. No snapshot was published.");
   snapshot.checkedAt = new Date().toISOString(); return snapshot;
 }
