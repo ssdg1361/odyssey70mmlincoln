@@ -33,7 +33,7 @@ async function runMonitor() {
   const { publishUrl, token } = await chrome.storage.local.get(["publishUrl", "token"]);
   if (!publishUrl || !token) return setStatus({ state: "needs_setup", message: "Add the dashboard publishing token before monitoring." });
   await setStatus({ state: "running", message: "Checking AMC in a temporary background tab…" });
-  let tab;
+  let tab, keepTabOpen = false;
   try {
     tab = await chrome.tabs.create({ url: `https://www.amctheatres.com/movies/the-odyssey-76238/showtimes?date=${DATES[0]}`, active: false });
     if (tab.status !== "complete") await waitForTab(tab.id);
@@ -51,8 +51,12 @@ async function runMonitor() {
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     const accessBlocked = /^AMC_ACCESS_BLOCKED:/.test(message);
+    // Preserve the AMC page on failures so the owner can see the access-control
+    // or rendered-page state that stopped the monitor. Successful runs remain
+    // quiet and close their temporary tab.
+    keepTabOpen = true;
     await setStatus({ state: accessBlocked ? "action_required" : "error", message: accessBlocked ? "AMC displayed Queue-it/CAPTCHA/access control. Open AMC normally, complete any required step yourself, then use Run now." : message });
-  } finally { if (tab?.id) chrome.tabs.remove(tab.id).catch(() => {}); }
+  } finally { if (tab?.id && !keepTabOpen) chrome.tabs.remove(tab.id).catch(() => {}); }
 }
 
 async function collectFromAmc(dates) {
