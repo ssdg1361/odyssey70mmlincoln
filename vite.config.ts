@@ -14,6 +14,10 @@ const isCodexSeatbeltSandbox = process.env.CODEX_SANDBOX === "seatbelt";
 const localBindingConfig = {
   main: "./worker/index.ts",
   compatibility_flags: ["nodejs_compat"],
+  compatibility_date: "2026-08-03",
+  // Optional Cloudflare Browser Run binding. The tracker remains usable via the
+  // normal-browser capture if AMC blocks bot-identified Browser Run requests.
+  browser: { binding: "BROWSER", remote: true },
   d1_databases: d1
     ? [
         {

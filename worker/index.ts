@@ -1,63 +1,28 @@
-/** Cloudflare Worker entry point for the vinext-starter template. */
+/** Cloudflare Worker entry point for Odyssey Seat Tracker. */
 import { handleImageOptimization, DEFAULT_DEVICE_SIZES, DEFAULT_IMAGE_SIZES } from "vinext/server/image-optimization";
 import handler from "vinext/server/app-router-entry";
 
+interface BrowserRun {
+  quickAction(action: "content", options: { url: string; gotoOptions?: { waitUntil?: string; timeout?: number } }): Promise<Response>;
+}
+
 interface Env {
   ASSETS: Fetcher;
-  AMC_VENDOR_KEY?: string;
+  /** Optional Cloudflare Browser Run binding. It is not an AMC credential. */
+  BROWSER?: BrowserRun;
+  /** Secret used only by a private, user-run browser capture to publish a snapshot. */
+  COLLECTOR_TOKEN?: string;
   DB: D1Database;
   IMAGES: {
-    input(stream: ReadableStream): {
-      transform(options: Record<string, unknown>): {
-        output(options: { format: string; quality: number }): Promise<{ response(): Response }>;
-      };
-    };
+    input(stream: ReadableStream): { transform(options: Record<string, unknown>): { output(options: { format: string; quality: number }): Promise<{ response(): Response }> } };
   };
 }
 
-interface ExecutionContext {
-  waitUntil(promise: Promise<unknown>): void;
-  passThroughOnException(): void;
-}
+interface ExecutionContext { waitUntil(promise: Promise<unknown>): void; passThroughOnException(): void; }
 
-// Image security config. SVG sources with .svg extension auto-skip the
-// optimization endpoint on the client side (served directly, no proxy).
-// To route SVGs through the optimizer (with security headers), set
-// dangerouslyAllowSVG: true in next.config.js and uncomment below:
-// const imageConfig: ImageConfig = { dangerouslyAllowSVG: true };
-
-const worker = {
-  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-    const url = new URL(request.url);
-
-    if (url.pathname === "/api/amc/showtimes") {
-      return getAmcShowtimes(env);
-    }
-
-    if (url.pathname === "/api/amc/seats") {
-      return getAmcSeats(url, env);
-    }
-
-    if (url.pathname === "/_vinext/image") {
-      const allowedWidths = [...DEFAULT_DEVICE_SIZES, ...DEFAULT_IMAGE_SIZES];
-      return handleImageOptimization(request, {
-        fetchAsset: (path) => env.ASSETS.fetch(new Request(new URL(path, request.url))),
-        transformImage: async (body, { width, format, quality }) => {
-          const result = await env.IMAGES.input(body).transform(width > 0 ? { width } : {}).output({ format, quality });
-          return result.response();
-        },
-      }, allowedWidths);
-    }
-
-    return handler.fetch(request, env, ctx);
-  },
-};
-
-export default worker;
-
-const AMC_API = "https://api.amctheatres.com";
 const THEATRE_NUMBER = 2116;
 const MOVIE_ID = 76238;
+const SNAPSHOT_PATH = "/__odyssey_seat_snapshot_v1";
 const TRACKED_DATES = [
   "2026-08-21", "2026-08-22", "2026-08-23", "2026-08-24", "2026-08-25", "2026-08-26",
   "2026-08-31", "2026-09-01", "2026-09-02", "2026-09-03", "2026-09-04", "2026-09-05",
@@ -65,148 +30,126 @@ const TRACKED_DATES = [
   "2026-09-12", "2026-09-13", "2026-09-14", "2026-09-15", "2026-09-16",
 ];
 
-function json(data: unknown, status = 200, cache = "no-store") {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: { "content-type": "application/json; charset=utf-8", "cache-control": cache },
-  });
-}
+type Seat = { available: boolean; row: number; column: number; name: string; type: string };
+type Showtime = { id: number; performanceNumber?: number; listingDate: string; showDateTimeUtc: string; isSoldOut: boolean; purchaseUrl: string };
+type Snapshot = { version: 1; source: "normal_browser" | "cloudflare_browser_run"; checkedAt: string; showtimes: Showtime[]; seatsByShowtime: Record<string, { rows: number; columns: number; seats: Seat[]; checkedAt: string }> };
 
-function apiHeaders(env: Env) {
-  return { accept: "application/json", "X-AMC-Vendor-Key": env.AMC_VENDOR_KEY ?? "" };
-}
-
-function missingKey(env: Env) {
-  if (env.AMC_VENDOR_KEY) return null;
-  return json({
-    state: "needs_key",
-    message: "Add AMC_VENDOR_KEY as a Cloudflare Worker secret to enable live showtimes and seating.",
-  }, 503);
-}
-
-function apiDate(iso: string) {
-  const [year, month, day] = iso.split("-");
-  return `${month}-${day}-${year}`;
-}
-
-function embeddedShowtimes(payload: any): any[] {
-  return payload?._embedded?.showtimes ?? payload?.showtimes ?? [];
-}
-
-function movieMatches(showtime: any) {
-  const directId = showtime?.movieId ?? showtime?.movie?.movieId ?? showtime?.movie?.id;
-  if (Number(directId) === MOVIE_ID) return true;
-  const movieLink = showtime?._links?.["https://api.amctheatres.com/rels/v2/movie"]?.href ?? "";
-  return movieLink.endsWith(`/movies/${MOVIE_ID}`);
-}
-
-function formatNames(showtime: any): string[] {
-  const values = [showtime?.format, ...(showtime?.attributes ?? [])].flatMap((entry: any) => {
-    if (!entry) return [];
-    if (typeof entry === "string") return [entry];
-    if (Array.isArray(entry?.edges)) return entry.edges.flatMap((edge: any) => [edge?.node?.code, edge?.node?.name]);
-    return [entry.code, entry.name, entry.description];
-  });
-  return values.filter(Boolean).map((value: unknown) => String(value).toLowerCase());
-}
-
-function isImax70mm(showtime: any) {
-  const formats = formatNames(showtime);
-  return formats.some((value) => value === "imax70mm" || value.includes("imax 70mm"));
-}
-
-async function getAmcShowtimes(env: Env) {
-  const unavailable = missingKey(env);
-  if (unavailable) return unavailable;
-
-  try {
-    const results = await mapWithConcurrency(TRACKED_DATES, 4, async (listingDate) => {
-      const endpoint = `${AMC_API}/v2/theatres/${THEATRE_NUMBER}/showtimes/${apiDate(listingDate)}?page-size=100`;
-      const response = await fetch(endpoint, { headers: apiHeaders(env) });
-      if (!response.ok) throw new Error(`AMC showtime request failed (${response.status})`);
-      const payload = await response.json();
-      return embeddedShowtimes(payload)
-        .filter((showtime) => movieMatches(showtime) && isImax70mm(showtime) && !showtime.isCanceled)
-        .map((showtime) => ({
-          id: Number(showtime.id ?? showtime.showtimeId),
-          performanceNumber: Number(showtime.performanceNumber),
-          listingDate,
-          showDateTimeLocal: showtime.showDateTimeLocal ?? showtime.showDateTimeUtc,
-          showDateTimeUtc: showtime.showDateTimeUtc,
-          isSoldOut: Boolean(showtime.isSoldOut),
-          purchaseUrl: showtime.purchaseUrl ?? `https://www.amctheatres.com/showtimes/${showtime.id ?? showtime.showtimeId}/seats`,
-        }));
-    });
-
-    const showtimes = results.flat().filter((showtime) => showtime.id && showtime.performanceNumber)
-      .sort((a, b) => String(a.showDateTimeLocal).localeCompare(String(b.showDateTimeLocal)));
-    const authorizedShowtimes = await Promise.all(showtimes.map(async (showtime) => ({
-      ...showtime,
-      accessToken: await signShowtime(env, showtime.id, showtime.performanceNumber),
-    })));
-    return json({ state: "live", checkedAt: new Date().toISOString(), showtimes: authorizedShowtimes }, 200, "private, max-age=60");
-  } catch (error) {
-    return json({ state: "api_error", message: error instanceof Error ? error.message : "AMC API request failed" }, 502);
-  }
-}
-
-async function getAmcSeats(url: URL, env: Env) {
-  const unavailable = missingKey(env);
-  if (unavailable) return unavailable;
-  const performanceNumber = Number(url.searchParams.get("performanceNumber"));
-  const showtimeId = Number(url.searchParams.get("showtimeId"));
-  const accessToken = url.searchParams.get("accessToken") ?? "";
-  if (!Number.isInteger(performanceNumber) || performanceNumber <= 0 || !Number.isInteger(showtimeId) || showtimeId <= 0) {
-    return json({ state: "bad_request", message: "A valid showtime is required." }, 400);
-  }
-  if (accessToken !== await signShowtime(env, showtimeId, performanceNumber)) {
-    return json({ state: "forbidden", message: "This performance is outside the authorized tracker results." }, 403);
-  }
-
-  try {
-    const endpoint = `${AMC_API}/v3/seating-layouts/${THEATRE_NUMBER}/${performanceNumber}`;
-    const response = await fetch(endpoint, { headers: apiHeaders(env) });
-    if (!response.ok) throw new Error(`AMC seating request failed (${response.status})`);
-    const payload: any = await response.json();
-    return json({
-      state: "live",
-      checkedAt: new Date().toISOString(),
-      rows: Number(payload.rows),
-      columns: Number(payload.columns),
-      seats: (payload.seats ?? []).map((seat: any) => ({
-        available: Boolean(seat.available),
-        row: Number(seat.row),
-        column: Number(seat.column),
-        name: String(seat.seatName ?? seat.name ?? ""),
-        type: String(seat.type ?? "NotASeat"),
-      })),
-    });
-  } catch (error) {
-    return json({ state: "api_error", message: error instanceof Error ? error.message : "AMC seating request failed" }, 502);
-  }
-}
-
-async function signShowtime(env: Env, showtimeId: number, performanceNumber: number) {
-  const key = await crypto.subtle.importKey(
-    "raw",
-    new TextEncoder().encode(env.AMC_VENDOR_KEY ?? ""),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign"],
-  );
-  const signature = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(`${showtimeId}:${performanceNumber}`));
-  return Array.from(new Uint8Array(signature), (byte) => byte.toString(16).padStart(2, "0")).join("");
-}
-
-async function mapWithConcurrency<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
-  const results = new Array<R>(items.length);
-  let next = 0;
-  async function worker() {
-    while (next < items.length) {
-      const index = next++;
-      results[index] = await fn(items[index]);
+const worker = {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+    const url = new URL(request.url);
+    if (url.pathname === "/api/amc/showtimes") return getShowtimes(request);
+    if (url.pathname === "/api/amc/seats") return getSeats(url, request);
+    if (url.pathname === "/api/collector/publish") return publishSnapshot(request, env);
+    if (url.pathname === "/api/collector/browser-run") return collectWithBrowserRun(request, env);
+    if (url.pathname === "/_vinext/image") {
+      const allowedWidths = [...DEFAULT_DEVICE_SIZES, ...DEFAULT_IMAGE_SIZES];
+      return handleImageOptimization(request, {
+        fetchAsset: (path) => env.ASSETS.fetch(new Request(new URL(path, request.url))),
+        transformImage: async (body, { width, format, quality }) => (await env.IMAGES.input(body).transform(width > 0 ? { width } : {}).output({ format, quality })).response(),
+      }, allowedWidths);
     }
-  }
-  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
-  return results;
+    return handler.fetch(request, env, ctx);
+  },
+};
+export default worker;
+
+function json(data: unknown, status = 200, cache = "no-store", extra: HeadersInit = {}) {
+  return new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json; charset=utf-8", "cache-control": cache, ...extra } });
 }
+function cacheKey(request: Request) { return new Request(new URL(SNAPSHOT_PATH, request.url).toString()); }
+async function readSnapshot(request: Request): Promise<Snapshot | null> {
+  if (typeof caches === "undefined") return null;
+  const response = await caches.default.match(cacheKey(request));
+  if (!response) return null;
+  try { return await response.json() as Snapshot; } catch { return null; }
+}
+async function writeSnapshot(request: Request, snapshot: Snapshot) {
+  if (typeof caches === "undefined") throw new Error("Cloudflare Cache API is unavailable in this runtime.");
+  await caches.default.put(cacheKey(request), json(snapshot, 200, "public, max-age=604800"));
+}
+function noSnapshot() {
+  return json({ state: "no_snapshot", message: "No AMC seat snapshot has been published yet. This tracker never invents showtimes or availability.", collector: "Run the normal-browser capture, or configure the optional Cloudflare Browser Run binding." }, 503);
+}
+function cors(request: Request, response: Response) {
+  const origin = request.headers.get("origin");
+  if (origin === "https://www.amctheatres.com") {
+    const headers = new Headers(response.headers);
+    headers.set("access-control-allow-origin", origin);
+    headers.set("access-control-allow-headers", "authorization, content-type");
+    headers.set("vary", "Origin");
+    return new Response(response.body, { status: response.status, headers });
+  }
+  return response;
+}
+function authorized(request: Request, env: Env) {
+  const supplied = request.headers.get("authorization")?.replace(/^Bearer\s+/i, "") ?? "";
+  return Boolean(env?.COLLECTOR_TOKEN && supplied && supplied === env.COLLECTOR_TOKEN);
+}
+function validDate(date: unknown) { return typeof date === "string" && TRACKED_DATES.includes(date); }
+
+async function getShowtimes(request: Request) {
+  const snapshot = await readSnapshot(request);
+  if (!snapshot) return noSnapshot();
+  return json({ state: "snapshot", source: snapshot.source, checkedAt: snapshot.checkedAt, showtimes: snapshot.showtimes }, 200, "no-store");
+}
+async function getSeats(url: URL, request: Request) {
+  const showtimeId = url.searchParams.get("showtimeId") ?? "";
+  const snapshot = await readSnapshot(request);
+  if (!snapshot) return noSnapshot();
+  const map = snapshot.seatsByShowtime[showtimeId];
+  if (!map) return json({ state: "not_collected", message: "This showing has not been captured in the latest snapshot." }, 404);
+  return json({ state: "snapshot", source: snapshot.source, ...map }, 200, "no-store");
+}
+
+async function publishSnapshot(request: Request, env: Env) {
+  if (request.method === "OPTIONS") return cors(request, new Response(null, { headers: { "access-control-allow-methods": "POST, OPTIONS", "access-control-max-age": "600" } }));
+  if (request.method !== "POST") return json({ state: "method_not_allowed" }, 405);
+  if (!authorized(request, env)) return cors(request, json({ state: "unauthorized", message: "Set COLLECTOR_TOKEN as a Worker secret, then supply it from the private capture." }, 401));
+  try {
+    const snapshot = await request.json() as Snapshot;
+    const validated = validateSnapshot(snapshot);
+    if (!validated) return cors(request, json({ state: "bad_snapshot", message: "The capture payload did not contain valid AMC showtimes and seat maps." }, 400));
+    await writeSnapshot(request, validated);
+    return cors(request, json({ state: "published", checkedAt: validated.checkedAt, performances: validated.showtimes.length }));
+  } catch { return cors(request, json({ state: "bad_json", message: "The capture payload was not valid JSON." }, 400)); }
+}
+
+function validateSnapshot(value: any): Snapshot | null {
+  if (!value || !Array.isArray(value.showtimes) || !value.seatsByShowtime || !["normal_browser", "cloudflare_browser_run"].includes(value.source)) return null;
+  const showtimes = value.showtimes.filter((showtime: any) => Number.isInteger(showtime?.id) && validDate(showtime?.listingDate) && typeof showtime?.showDateTimeUtc === "string" && /^https:\/\/www\.amctheatres\.com\/showtimes\/\d+\/seats$/.test(showtime?.purchaseUrl));
+  const seatsByShowtime: Snapshot["seatsByShowtime"] = {};
+  for (const showtime of showtimes) {
+    const map = value.seatsByShowtime[String(showtime.id)];
+    if (!map || !Number.isInteger(map.rows) || !Number.isInteger(map.columns) || !Array.isArray(map.seats) || map.rows < 1 || map.columns < 1) continue;
+    const seats = map.seats.filter((seat: any) => Number.isInteger(seat?.row) && Number.isInteger(seat?.column) && typeof seat?.name === "string" && typeof seat?.type === "string" && typeof seat?.available === "boolean");
+    if (seats.length === 0) continue;
+    seatsByShowtime[String(showtime.id)] = { rows: map.rows, columns: map.columns, seats, checkedAt: typeof map.checkedAt === "string" ? map.checkedAt : value.checkedAt };
+  }
+  const complete = showtimes.filter((showtime: Showtime) => seatsByShowtime[String(showtime.id)]);
+  if (!complete.length) return null;
+  return { version: 1, source: value.source, checkedAt: typeof value.checkedAt === "string" ? value.checkedAt : new Date().toISOString(), showtimes: complete, seatsByShowtime };
+}
+
+/**
+ * Optional one-date Cloudflare Browser Run collector. It intentionally makes no
+ * attempt to change identity, solve a challenge, or continue after a Queue-it/
+ * CAPTCHA page. Browser Run identifies itself as a bot, so a block is expected
+ * to be possible and leaves the last good snapshot intact.
+ */
+async function collectWithBrowserRun(request: Request, env: Env) {
+  if (request.method !== "POST") return json({ state: "method_not_allowed" }, 405);
+  if (!authorized(request, env)) return json({ state: "unauthorized" }, 401);
+  if (!env?.BROWSER) return json({ state: "browser_unavailable", message: "Add the BROWSER Cloudflare Browser Run binding before using this collector." }, 503);
+  const body = await request.json().catch(() => ({})) as { listingDate?: string };
+  if (!validDate(body.listingDate)) return json({ state: "bad_request", message: "Provide one eligible listingDate (YYYY-MM-DD)." }, 400);
+  const landing = `https://www.amctheatres.com/movies/the-odyssey-${MOVIE_ID}/showtimes?date=${body.listingDate}`;
+  try {
+    const rendered = await env.BROWSER.quickAction("content", { url: landing, gotoOptions: { waitUntil: "networkidle2", timeout: 20_000 } });
+    const text = await rendered.text();
+    if (isAccessBlocked(text)) return json({ state: "access_blocked", message: "AMC returned Queue-it, CAPTCHA, or another access-control page. No snapshot was changed." }, 409);
+    return json({ state: "browser_rendered", message: "The public page rendered. Use the normal-browser capture for parsing and publishing; automated parsing is intentionally disabled until AMC consistently permits Browser Run." }, 202);
+  } catch (error) {
+    return json({ state: "browser_error", message: error instanceof Error ? error.message : "Browser Run could not render AMC." }, 502);
+  }
+}
+function isAccessBlocked(text: string) { return /queue-it|queueit|captcha|verify you are human|access denied/i.test(text); }

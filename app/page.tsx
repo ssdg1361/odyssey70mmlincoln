@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 
-type SourceState = "loading" | "live" | "needs_key" | "api_error";
+type SourceState = "loading" | "snapshot" | "no_snapshot" | "api_error";
 type Showtime = {
   id: number;
   performanceNumber: number;
@@ -11,12 +11,10 @@ type Showtime = {
   showDateTimeUtc?: string;
   isSoldOut: boolean;
   purchaseUrl: string;
-  accessToken: string;
 };
 type Seat = { available: boolean; row: number; column: number; name: string; type: string };
 type SeatMap = { rows: number; columns: number; seats: Seat[]; checkedAt: string };
 
-const AMC_ACCESS = "https://developers.amctheatres.com/GettingStarted/Authentication";
 const REFERENCE_URL = "https://www.amctheatres.com/showtimes/145701522/seats";
 const preferredRows = new Set(["D", "E", "F", "G", "H", "J"]);
 const referenceRows = [
@@ -64,12 +62,12 @@ export default function Home() {
   const [newlyOpened, setNewlyOpened] = useState<Set<string>>(new Set());
 
   const loadShowtimes = useCallback(async () => {
-    setState((current) => current === "live" ? current : "loading");
+    setState((current) => current === "snapshot" ? current : "loading");
     try {
       const response = await fetch("/api/amc/showtimes?v=1", { cache: "no-store" });
       const data = await response.json();
       if (!response.ok) { setState(data.state ?? "api_error"); setMessage(data.message ?? "AMC connection failed"); return; }
-      setState("live"); setMessage(""); setShowtimes(data.showtimes ?? []); setCheckedAt(data.checkedAt);
+      setState("snapshot"); setMessage(""); setShowtimes(data.showtimes ?? []); setCheckedAt(data.checkedAt);
       setSelected((current) => current ?? data.showtimes?.[0] ?? null);
     } catch {
       setState("api_error"); setMessage("The tracker could not reach its AMC connector.");
@@ -79,7 +77,7 @@ export default function Home() {
   const loadSeats = useCallback(async (showtime: Showtime, quiet = false) => {
     if (!quiet) setSeatLoading(true);
     try {
-      const params = new URLSearchParams({ showtimeId: String(showtime.id), performanceNumber: String(showtime.performanceNumber), accessToken: showtime.accessToken });
+      const params = new URLSearchParams({ showtimeId: String(showtime.id) });
       const response = await fetch(`/api/amc/seats?${params}`, { cache: "no-store" });
       const data = await response.json();
       if (!response.ok) { setMessage(data.message ?? "AMC seating request failed"); return; }
@@ -102,7 +100,7 @@ export default function Home() {
 
   useEffect(() => { loadShowtimes(); const timer = window.setInterval(loadShowtimes, 10 * 60_000); return () => clearInterval(timer); }, [loadShowtimes]);
   useEffect(() => {
-    if (!selected || state !== "live") { setSeatMap(null); return; }
+    if (!selected || state !== "snapshot") { setSeatMap(null); return; }
     loadSeats(selected);
     const timer = window.setInterval(() => loadSeats(selected, true), 60_000);
     return () => clearInterval(timer);
@@ -128,17 +126,17 @@ export default function Home() {
     </header>
 
     <section className={`status-card ${state}`}>
-      <div><span className="status-label">AMC DATA SOURCE</span><strong>{state === "live" ? "Connected" : state === "loading" ? "Connecting…" : state === "needs_key" ? "Vendor key required" : "Connection error"}</strong><p>{state === "live" ? `${showtimes.length} eligible IMAX 70mm performance${showtimes.length === 1 ? "" : "s"} found.` : message}</p></div>
-      <div className="status-side"><span className="status-pill">{state === "live" ? "LIVE" : state === "loading" ? "CHECKING" : "SETUP"}</span><small>Last checked<br />{checkedLabel(checkedAt)}</small></div>
+      <div><span className="status-label">AMC DATA SOURCE</span><strong>{state === "snapshot" ? "Snapshot available" : state === "loading" ? "Checking snapshot…" : state === "no_snapshot" ? "Awaiting first capture" : "Connection error"}</strong><p>{state === "snapshot" ? `${showtimes.length} eligible IMAX 70mm performance${showtimes.length === 1 ? "" : "s"} in the last ordinary-browser capture.` : message}</p></div>
+      <div className="status-side"><span className="status-pill">{state === "snapshot" ? "CAPTURED" : state === "loading" ? "CHECKING" : "SETUP"}</span><small>Last captured<br />{checkedLabel(checkedAt)}</small></div>
     </section>
 
-    {state === "needs_key" && <section className="setup-card"><span className="section-kicker">ONE-TIME SETUP</span><h2>Connect AMC’s official API</h2><p>The connector is built. Add an approved key to Cloudflare as the secret <code>AMC_VENDOR_KEY</code>; it stays server-side and is never sent to your browser.</p><a href={AMC_ACCESS} target="_blank" rel="noreferrer">Request AMC API access ↗</a><div className="reference"><b>Verified integration reference</b><span>AMC listing date Aug 22 · actual showtime Sun, Aug 23 at 2:00 AM · ID 145701522</span><a href={REFERENCE_URL} target="_blank" rel="noreferrer">View at AMC</a></div></section>}
+    {state === "no_snapshot" && <section className="setup-card"><span className="section-kicker">COLLECTOR REQUIRED</span><h2>Capture from normal AMC pages</h2><p>This dashboard uses a compact snapshot captured from AMC’s ordinary public pages in a normal browser. It does not use an AMC vendor key, invent showtimes, or bypass Queue-it/CAPTCHAs. The private collector token stays only in the capture setup.</p><div className="reference"><b>Verified parsing reference</b><span>AMC listing date Aug 22 · actual start Sun, Aug 23 at 2:00 AM · ID 145701522. The map preserves AMC’s real 42 × 12 geometry.</span><a href={REFERENCE_URL} target="_blank" rel="noreferrer">View at AMC</a></div></section>}
 
     <section className="showings">
       <div className="section-heading"><div><span className="section-kicker">PERFORMANCES</span><h2>Eligible showings</h2></div><button onClick={loadShowtimes} disabled={state === "loading"}>Refresh</button></div>
-      {state === "live" && showtimes.length === 0 && <div className="empty"><b>No eligible showings found</b><p>AMC returned no IMAX 70mm performances in the tracked window.</p></div>}
-      {state !== "live" && <div className="empty"><b>Waiting for live AMC data</b><p>No substitute or fabricated showtimes are displayed.</p></div>}
-      {state === "live" && grouped.map(([date, dateShowtimes]) => <article className="day-card" key={date}><div className="day-label"><b>{listingDateLabel(date)}</b><small>AMC listing date</small></div><div className="times">{dateShowtimes.map((showtime) => { const chosen = selected?.id === showtime.id; return <button key={showtime.id} className={chosen ? "selected" : ""} onClick={() => setSelected(showtime)}><b>{timeLabel(showtime)}</b><span>{actualDateLabel(showtime)}</span>{isEarly(showtime) && <small>EARLY</small>}</button>; })}</div></article>)}
+      {state === "snapshot" && showtimes.length === 0 && <div className="empty"><b>No eligible showings found</b><p>The last capture contained no IMAX 70mm performances in the tracked window.</p></div>}
+      {state !== "snapshot" && <div className="empty"><b>Waiting for an AMC page capture</b><p>No substitute or fabricated showtimes are displayed.</p></div>}
+      {state === "snapshot" && grouped.map(([date, dateShowtimes]) => <article className="day-card" key={date}><div className="day-label"><b>{listingDateLabel(date)}</b><small>AMC listing date</small></div><div className="times">{dateShowtimes.map((showtime) => { const chosen = selected?.id === showtime.id; return <button key={showtime.id} className={chosen ? "selected" : ""} onClick={() => setSelected(showtime)}><b>{timeLabel(showtime)}</b><span>{actualDateLabel(showtime)}</span>{isEarly(showtime) && <small>EARLY</small>}</button>; })}</div></article>)}
     </section>
 
     <section className="seat-panel">
@@ -149,7 +147,7 @@ export default function Home() {
       <div className="legend"><span><i className="lg-preferred" /> Preferred center D–J</span><span><i className="lg-open" /> Eligible open</span><span><i className="lg-lower" /> Row C</span><span><i className="lg-occupied" /> Occupied</span><span><i className="lg-new" /> Newly opened</span></div>
       {selectedSeat && <div className="seat-choice"><b>{selectedSeat}</b> is open and meets your rules. <a href={selected?.purchaseUrl ?? REFERENCE_URL} target="_blank" rel="noreferrer">Book at AMC ↗</a></div>}
     </section>
-    <footer>LIVE DATA REQUIRES APPROVED AMC VENDOR ACCESS · KEY NEVER LEAVES THE SERVER</footer>
+    <footer>AMC PAGE SNAPSHOT · NO VENDOR KEY · ACCESS CONTROLS ARE NEVER BYPASSED</footer>
   </main>;
 }
 

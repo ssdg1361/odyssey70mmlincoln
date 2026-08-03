@@ -1,100 +1,59 @@
-# vinext-starter
+# Odyssey Seat Tracker
 
-A clean full-stack starter running on
-[vinext](https://github.com/cloudflare/vinext), with optional Cloudflare D1 and
-Drizzle support.
+Private, mobile-first dashboard for one IMAX 70mm ticket to *The Odyssey* at AMC Lincoln Square 13. It tracks only Aug 21–Sep 16, 2026, excluding Aug 27–30, and treats AMC's listing date separately from the real Eastern start date.
 
-## Prerequisites
+## Data model
 
-- Node.js `>=22.13.0`
+This project deliberately does **not** use an AMC vendor key or fabricate data. The dashboard displays the most recent compact snapshot captured from AMC's normal public pages:
 
-## Quick Start
+- only `IMAX 70MM` performances are included;
+- each seat map keeps AMC's real row, column, seat type, and availability values;
+- rows A/B are disabled, C is marked lower priority, and centered D–J are highlighted;
+- new openings are calculated in the dashboard by comparing snapshots in the visitor's browser.
+
+The verified reference is AMC listing date **Aug 22**, showtime ID **145701522**, whose actual start is **Sun, Aug 23, 2026 at 2:00 AM ET**. Its auditorium is 42 columns by 12 rows (A–H, J–M; no I).
+
+## Capture options
+
+### Normal-browser capture (recommended fallback)
+
+This is the consumer-feasible path. It runs in the user's already-open normal AMC browser, loads the ordinary public date and seat pages at roughly one request per 1.4 seconds, then posts one compact snapshot to this Worker. It stops without publishing if AMC returns Queue-it, CAPTCHA, access denied, or an unexpected page. It does not read cookies, solve a challenge, or bypass access controls.
+
+1. In the Cloudflare Worker dashboard, add a random Worker secret named `COLLECTOR_TOKEN`.
+2. Open an ordinary `amctheatres.com` Odyssey showtimes page in the browser where you normally access AMC.
+3. In DevTools Console, set the private configuration (replace both values):
+
+```js
+window.ODYSSEY_COLLECTOR = {
+  publishUrl: "https://odyssey70mmlincoln.sjs05k.workers.dev/api/collector/publish",
+  token: "your-COLLECTOR_TOKEN-value",
+};
+```
+
+4. Paste and run the contents of [`public/odyssey-amc-capture.js`](public/odyssey-amc-capture.js). The console logs each listing and seat page. On success it logs `Published`; then reload the dashboard.
+
+The token is only an authorization key for writing to this private dashboard. Do not paste it into a public page, commit it, or reuse an AMC password/token.
+
+### Optional Cloudflare Browser Run probe
+
+`vite.config.ts` declares an optional `BROWSER` Browser Run binding. After that binding is enabled in the Worker deployment and `COLLECTOR_TOKEN` is configured, an owner can POST `{ "listingDate": "2026-08-22" }` to `/api/collector/browser-run` with `Authorization: Bearer <COLLECTOR_TOKEN>`.
+
+The route deliberately does only a one-date render probe and leaves the last snapshot unchanged if AMC responds with Queue-it, CAPTCHA, or another access-control page. Cloudflare documents that Browser Run requests are identifiable as bots, so it is not relied on as a guaranteed unattended collector.
+
+## API
+
+- `GET /api/amc/showtimes` — latest captured IMAX 70mm performances.
+- `GET /api/amc/seats?showtimeId=145701522` — seat geometry and state from that snapshot.
+- `POST /api/collector/publish` — authenticated normal-browser snapshot publication.
+- `POST /api/collector/browser-run` — authenticated, optional one-date Browser Run render probe.
+
+Snapshots are stored in Cloudflare's edge cache for up to seven days. A new successful capture replaces the old snapshot; if a capture is blocked, the prior good snapshot is retained.
+
+## Development
 
 ```bash
-npm install
-npm run dev
-npm run build
+pnpm install
+pnpm run build
 ```
 
-This starter does not use `wrangler.jsonc`.
-
-## Included Shape
-
-- edit site code under `app/`
-- `.openai/hosting.json` declares optional Sites D1 and R2 bindings
-- `vite.config.ts` simulates declared bindings for local development
-- `db/schema.ts` starts intentionally empty
-- `examples/d1/` contains an optional D1 example surface
-- `drizzle.config.ts` supports local migration generation when needed
-
-## Workspace Auth Headers
-
-Signed-in visitors receive both `oai-authenticated-user-id` and `oai-authenticated-user-email`. Private Sites require every visitor to sign in; public Sites may also have anonymous visitors, for whom neither header is present.
-
-The user ID is stable for the same user on the same Site and different across Sites. Email and name are intended for display or contact purposes.
-
-SIWC-authenticated workspace sites may also receive
-`oai-authenticated-user-full-name` when the user's SIWC profile has a non-empty
-`name` claim. The full-name value is percent-encoded UTF-8 and is accompanied by
-`oai-authenticated-user-full-name-encoding: percent-encoded-utf-8`.
-
-Treat the full name as optional and fall back to email when it is absent:
-
-```tsx
-import { headers } from "next/headers";
-
-export default async function Home() {
-  const requestHeaders = await headers();
-  const userId = requestHeaders.get("oai-authenticated-user-id");
-  const email = requestHeaders.get("oai-authenticated-user-email");
-  const encodedFullName = requestHeaders.get("oai-authenticated-user-full-name");
-  const fullName =
-    encodedFullName &&
-    requestHeaders.get("oai-authenticated-user-full-name-encoding") ===
-      "percent-encoded-utf-8"
-      ? decodeURIComponent(encodedFullName)
-      : null;
-
-  const displayName = fullName ?? email;
-  // ...
-}
-```
-
-## Optional Dispatch-Owned ChatGPT Sign-In
-
-Import the ready-to-use helpers from `app/chatgpt-auth.ts` when the site needs
-optional or required ChatGPT sign-in:
-
-- Use `getChatGPTUser()` for optional signed-in UI.
-- Use `requireChatGPTUser(returnTo)` for server-rendered pages that should send
-  anonymous visitors through Sign in with ChatGPT.
-- Use `chatGPTSignInPath(returnTo)` and `chatGPTSignOutPath(returnTo)` for
-  browser links or actions.
-- Pass a same-origin relative `returnTo` path for the destination after sign-in
-  or sign-out. The helper validates and safely encodes it.
-- Mark protected pages with `export const dynamic = "force-dynamic"` because
-  they depend on per-request identity headers.
-
-Dispatch owns `/signin-with-chatgpt`, `/signout-with-chatgpt`, `/callback`, the
-OAuth cookies, and identity header injection. Do not implement app routes for
-those reserved paths. Routes that do not import and call the helper remain
-anonymous-compatible.
-
-SIWC establishes identity only; it does not prove workspace membership. Use the
-Sites hosting platform's access policy controls for workspace-wide restrictions,
-or enforce explicit server-side membership or allowlist checks.
-
-Use SIWC for account pages, user-specific dashboards, saved records, and write
-actions tied to the current ChatGPT user. Leave public content anonymous.
-
-## Useful Commands
-
-- `npm run dev`: start local development
-- `npm run build`: verify the vinext build output
-- `npm test`: build the starter and verify its rendered loading skeleton
-- `npm run db:generate`: generate Drizzle migrations after schema changes
-
-## Learn More
-
-- [vinext Documentation](https://github.com/cloudflare/vinext)
-- [Drizzle D1 Guide](https://orm.drizzle.team/docs/get-started/d1-new)
+The worker has no database requirement. Browser Run requires Cloudflare's browser binding; the normal-browser capture does not.
