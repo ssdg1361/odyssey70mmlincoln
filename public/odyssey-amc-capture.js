@@ -15,14 +15,14 @@
   ];
   const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   const blocked = (text) => /queue-it|queueit|captcha|verify you are human|access denied/i.test(text);
-  const normalise = (text) => text.replace(/\\\\"/g, '"').replace(/\\\\\\\\/g, "\\\\");
+  const normalise = (text) => text.replaceAll('\\"', '"').replaceAll('\\\\', '\\');
   const jsonBlock = (text, start) => {
     const open = text.indexOf("{", start);
     if (open < 0) return null;
     let quote = false, escape = false, depth = 0;
     for (let i = open; i < text.length; i += 1) {
       const char = text[i];
-      if (quote) { if (escape) escape = false; else if (char === "\\\\") escape = true; else if (char === '"') quote = false; continue; }
+      if (quote) { if (escape) escape = false; else if (char === "\\") escape = true; else if (char === '"') quote = false; continue; }
       if (char === '"') quote = true;
       else if (char === "{") depth += 1;
       else if (char === "}" && --depth === 0) return text.slice(open, i + 1);
