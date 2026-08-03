@@ -66,7 +66,7 @@ export default function Home() {
   const loadShowtimes = useCallback(async () => {
     setState((current) => current === "live" ? current : "loading");
     try {
-      const response = await fetch("/api/amc/showtimes", { cache: "no-store" });
+      const response = await fetch("/api/amc/showtimes?v=1", { cache: "no-store" });
       const data = await response.json();
       if (!response.ok) { setState(data.state ?? "api_error"); setMessage(data.message ?? "AMC connection failed"); return; }
       setState("live"); setMessage(""); setShowtimes(data.showtimes ?? []); setCheckedAt(data.checkedAt);
