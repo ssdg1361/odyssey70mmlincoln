@@ -43,7 +43,10 @@ async function runMonitor() {
     const snapshot = result.result;
     const response = await fetch(publishUrl, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${token}` }, body: JSON.stringify(snapshot) });
     const published = await response.json();
-    if (!response.ok) throw new Error(published.message || "Dashboard rejected the snapshot.");
+    if (!response.ok) {
+      const detail = published.detail ? ` [showtimes: ${published.detail.showtimesReceived}/${published.detail.validShowtimes}; maps: ${published.detail.usableSeatMaps}; source: ${published.detail.source}]` : "";
+      throw new Error((published.message || "Dashboard rejected the snapshot.") + detail);
+    }
     await setStatus({ state: "ok", message: `Published ${published.performances} performance${published.performances === 1 ? "" : "s"}.`, checkedAt: snapshot.checkedAt });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

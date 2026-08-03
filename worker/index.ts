@@ -109,10 +109,21 @@ async function publishSnapshot(request: Request, env: Env) {
   try {
     const snapshot = await request.json() as Snapshot;
     const validated = validateSnapshot(snapshot);
-    if (!validated) return cors(request, json({ state: "bad_snapshot", message: "The capture payload did not contain valid AMC showtimes and seat maps." }, 400));
+    if (!validated) return cors(request, json({ state: "bad_snapshot", message: "The capture payload did not contain valid AMC showtimes and seat maps.", detail: snapshotDiagnostics(snapshot) }, 400));
     await writeSnapshot(request, validated);
     return cors(request, json({ state: "published", checkedAt: validated.checkedAt, performances: validated.showtimes.length }));
   } catch { return cors(request, json({ state: "bad_json", message: "The capture payload was not valid JSON." }, 400)); }
+}
+
+function snapshotDiagnostics(value: any) {
+  const showtimes = Array.isArray(value?.showtimes) ? value.showtimes : [];
+  const validShowtimes = showtimes.filter((showtime: any) => Number.isInteger(showtime?.id) && validDate(showtime?.listingDate) && typeof showtime?.showDateTimeUtc === "string" && /^https:\/\/www\.amctheatres\.com\/showtimes\/\d+\/seats$/.test(showtime?.purchaseUrl));
+  const maps = value?.seatsByShowtime && typeof value.seatsByShowtime === "object" ? value.seatsByShowtime : {};
+  const usableMaps = validShowtimes.filter((showtime: any) => {
+    const map = maps[String(showtime.id)];
+    return Number.isInteger(map?.rows) && Number.isInteger(map?.columns) && Array.isArray(map?.seats) && map.seats.some((seat: any) => Number.isInteger(seat?.row) && Number.isInteger(seat?.column) && typeof seat?.name === "string" && typeof seat?.type === "string" && typeof seat?.available === "boolean");
+  });
+  return { source: value?.source ?? null, showtimesReceived: showtimes.length, validShowtimes: validShowtimes.length, usableSeatMaps: usableMaps.length };
 }
 
 function validateSnapshot(value: any): Snapshot | null {
