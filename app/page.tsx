@@ -1,90 +1,158 @@
 "use client";
 
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
-type Showing = { id: string; date: string; time: string; source: "manual" };
+type SourceState = "loading" | "live" | "needs_key" | "api_error";
+type Showtime = {
+  id: number;
+  performanceNumber: number;
+  listingDate: string;
+  showDateTimeLocal?: string;
+  showDateTimeUtc?: string;
+  isSoldOut: boolean;
+  purchaseUrl: string;
+  accessToken: string;
+};
+type Seat = { available: boolean; row: number; column: number; name: string; type: string };
+type SeatMap = { rows: number; columns: number; seats: Seat[]; checkedAt: string };
 
-const validDates = [
-  "2026-08-21", "2026-08-22", "2026-08-23", "2026-08-24", "2026-08-25", "2026-08-26",
-  "2026-08-31", "2026-09-01", "2026-09-02", "2026-09-03", "2026-09-04", "2026-09-05", "2026-09-06", "2026-09-07", "2026-09-08", "2026-09-09", "2026-09-10", "2026-09-11", "2026-09-12", "2026-09-13", "2026-09-14", "2026-09-15", "2026-09-16",
-];
-const rows = ["A", "B", "C", "D", "E", "F", "G", "H", "J"];
-const seatNumbers = Array.from({ length: 14 }, (_, i) => i + 1);
-const amcUrl = "https://www.amctheatres.com/movie-theatres/new-york-city/amc-lincoln-square-13/showtimes";
+const AMC_ACCESS = "https://developers.amctheatres.com/GettingStarted/Authentication";
+const REFERENCE_URL = "https://www.amctheatres.com/showtimes/145701522/seats";
+const preferredRows = new Set(["D", "E", "F", "G", "H", "J"]);
+const referenceRows = [
+  ["A", 6, 33], ["B", 5, 35], ["C", 3, 38], ["D", 2, 41],
+  ["E", 1, 42], ["F", 1, 42], ["G", 1, 42], ["H", 1, 42],
+  ["J", 1, 42], ["K", 1, 42], ["L", 1, 42], ["M", 2, 39],
+] as const;
 
-function labelDate(value: string) {
-  return new Intl.DateTimeFormat("en-US", { weekday: "short", month: "short", day: "numeric" }).format(new Date(`${value}T12:00:00`));
+function instant(showtime: Showtime) {
+  const value = showtime.showDateTimeUtc ?? showtime.showDateTimeLocal ?? "";
+  return new Date(value.endsWith("Z") || /[+-]\d\d:\d\d$/.test(value) ? value : `${value}-04:00`);
 }
-function labelTime(value: string) {
-  return new Intl.DateTimeFormat("en-US", { hour: "numeric", minute: "2-digit" }).format(new Date(`2026-01-01T${value}:00`));
+function timeLabel(showtime: Showtime) {
+  return new Intl.DateTimeFormat("en-US", { hour: "numeric", minute: "2-digit", timeZone: "America/New_York" }).format(instant(showtime));
+}
+function actualDateLabel(showtime: Showtime) {
+  return new Intl.DateTimeFormat("en-US", { weekday: "short", month: "short", day: "numeric", timeZone: "America/New_York" }).format(instant(showtime));
+}
+function listingDateLabel(value: string) {
+  return new Intl.DateTimeFormat("en-US", { weekday: "short", month: "short", day: "numeric", timeZone: "UTC" }).format(new Date(`${value}T12:00:00Z`));
+}
+function checkedLabel(value?: string) {
+  if (!value) return "Never";
+  return new Intl.DateTimeFormat("en-US", { hour: "numeric", minute: "2-digit", second: "2-digit", timeZone: "America/New_York" }).format(new Date(value));
+}
+function isEarly(showtime: Showtime) {
+  const parts = new Intl.DateTimeFormat("en-US", { hour: "numeric", minute: "2-digit", hourCycle: "h23", timeZone: "America/New_York" }).formatToParts(instant(showtime));
+  const hour = Number(parts.find((part) => part.type === "hour")?.value ?? 24);
+  const minute = Number(parts.find((part) => part.type === "minute")?.value ?? 59);
+  return hour < 10 || (hour === 10 && minute === 0);
+}
+function rowLetter(seat: Seat) {
+  return seat.name.match(/^[A-Z]+/)?.[0] ?? "";
 }
 
 export default function Home() {
-  const [showings, setShowings] = useState<Showing[]>([]);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [seat, setSeat] = useState<string | null>(null);
-  const [date, setDate] = useState(validDates[0]);
-  const [time, setTime] = useState("14:00");
+  const [state, setState] = useState<SourceState>("loading");
+  const [message, setMessage] = useState("");
+  const [showtimes, setShowtimes] = useState<Showtime[]>([]);
+  const [checkedAt, setCheckedAt] = useState<string>();
+  const [selected, setSelected] = useState<Showtime | null>(null);
+  const [seatMap, setSeatMap] = useState<SeatMap | null>(null);
+  const [seatLoading, setSeatLoading] = useState(false);
+  const [selectedSeat, setSelectedSeat] = useState<string | null>(null);
+  const [newlyOpened, setNewlyOpened] = useState<Set<string>>(new Set());
 
-  useEffect(() => {
-    const saved = window.localStorage.getItem("odyssey-confirmed-showings");
-    if (saved) setShowings(JSON.parse(saved));
+  const loadShowtimes = useCallback(async () => {
+    setState((current) => current === "live" ? current : "loading");
+    try {
+      const response = await fetch("/api/amc/showtimes", { cache: "no-store" });
+      const data = await response.json();
+      if (!response.ok) { setState(data.state ?? "api_error"); setMessage(data.message ?? "AMC connection failed"); return; }
+      setState("live"); setMessage(""); setShowtimes(data.showtimes ?? []); setCheckedAt(data.checkedAt);
+      setSelected((current) => current ?? data.showtimes?.[0] ?? null);
+    } catch {
+      setState("api_error"); setMessage("The tracker could not reach its AMC connector.");
+    }
   }, []);
-  const save = (next: Showing[]) => { setShowings(next); window.localStorage.setItem("odyssey-confirmed-showings", JSON.stringify(next)); };
-  const selected = showings.find((showing) => showing.id === selectedId) ?? null;
-  const sorted = useMemo(() => [...showings].sort((a, b) => `${a.date}${a.time}`.localeCompare(`${b.date}${b.time}`)), [showings]);
 
-  function addShowing(event: FormEvent) {
-    event.preventDefault();
-    const next = [...showings, { id: crypto.randomUUID(), date, time, source: "manual" }];
-    save(next); setSelectedId(next[next.length - 1].id); setSeat(null);
-  }
-  function removeShowing(id: string) {
-    save(showings.filter((showing) => showing.id !== id));
-    if (selectedId === id) { setSelectedId(null); setSeat(null); }
-  }
+  const loadSeats = useCallback(async (showtime: Showtime, quiet = false) => {
+    if (!quiet) setSeatLoading(true);
+    try {
+      const params = new URLSearchParams({ showtimeId: String(showtime.id), performanceNumber: String(showtime.performanceNumber), accessToken: showtime.accessToken });
+      const response = await fetch(`/api/amc/seats?${params}`, { cache: "no-store" });
+      const data = await response.json();
+      if (!response.ok) { setMessage(data.message ?? "AMC seating request failed"); return; }
+      const map: SeatMap = data;
+      const storageKey = `odyssey-seats-${showtime.id}`;
+      const previous: Record<string, boolean> = JSON.parse(localStorage.getItem(storageKey) ?? "{}");
+      const current: Record<string, boolean> = {};
+      const opened = new Set<string>();
+      map.seats.forEach((seat) => {
+        if (!seat.name || seat.type === "NotASeat") return;
+        current[seat.name] = seat.available;
+        if (Object.prototype.hasOwnProperty.call(previous, seat.name) && !previous[seat.name] && seat.available) opened.add(seat.name);
+      });
+      localStorage.setItem(storageKey, JSON.stringify(current));
+      setNewlyOpened(opened); setSeatMap(map); setSelectedSeat(null); setMessage("");
+    } catch {
+      setMessage("The tracker could not refresh this seat map.");
+    } finally { setSeatLoading(false); }
+  }, []);
+
+  useEffect(() => { loadShowtimes(); const timer = window.setInterval(loadShowtimes, 10 * 60_000); return () => clearInterval(timer); }, [loadShowtimes]);
+  useEffect(() => {
+    if (!selected || state !== "live") { setSeatMap(null); return; }
+    loadSeats(selected);
+    const timer = window.setInterval(() => loadSeats(selected, true), 60_000);
+    return () => clearInterval(timer);
+  }, [selected, state, loadSeats]);
+
+  const grouped = useMemo(() => {
+    const groups = new Map<string, Showtime[]>();
+    showtimes.forEach((showtime) => groups.set(showtime.listingDate, [...(groups.get(showtime.listingDate) ?? []), showtime]));
+    return Array.from(groups.entries());
+  }, [showtimes]);
+  const seatRows = useMemo(() => {
+    if (!seatMap) return [];
+    return Array.from({ length: seatMap.rows }, (_, index) => seatMap.seats.filter((seat) => seat.row === index + 1));
+  }, [seatMap]);
+  const eligibleCount = seatMap?.seats.filter((seat) => seat.available && seat.type === "CanReserve" && !["A", "B"].includes(rowLetter(seat))).length ?? 0;
 
   return <main>
     <header className="hero">
-      <div className="eyebrow"><span className="dot" /> PERSONAL DASHBOARD</div>
+      <div className="eyebrow"><span className="dot" /> LIVE SEAT WATCH</div>
       <h1>Odyssey<br /><em>Seat Tracker</em></h1>
       <p>One ticket · AMC Lincoln Square 13 · IMAX 70mm only</p>
       <div className="date-range">AUG 21 — SEP 16, 2026 <span>·</span> AUG 27–30 EXCLUDED</div>
     </header>
 
-    <section className="truth-card">
-      <div><span className="status-label">LIVE AVAILABILITY</span><strong>Not connected</strong><p>No AMC API or approved data feed is configured. This dashboard never invents showtimes or seat availability.</p></div>
-      <span className="chip">HONEST V1</span>
+    <section className={`status-card ${state}`}>
+      <div><span className="status-label">AMC DATA SOURCE</span><strong>{state === "live" ? "Connected" : state === "loading" ? "Connecting…" : state === "needs_key" ? "Vendor key required" : "Connection error"}</strong><p>{state === "live" ? `${showtimes.length} eligible IMAX 70mm performance${showtimes.length === 1 ? "" : "s"} found.` : message}</p></div>
+      <div className="status-side"><span className="status-pill">{state === "live" ? "LIVE" : state === "loading" ? "CHECKING" : "SETUP"}</span><small>Last checked<br />{checkedLabel(checkedAt)}</small></div>
     </section>
 
-    <section className="source-panel">
-      <div><span className="section-kicker">CHECK SOURCE</span><h2>AMC Lincoln Square 13</h2><p>Use AMC to verify date, time, format, and seats; then save the confirmed showing here.</p></div>
-      <a href={amcUrl} target="_blank" rel="noreferrer">Open AMC <span>↗</span></a>
-    </section>
-
-    <section className="add-panel">
-      <div className="section-heading"><div><span className="section-kicker">STEP 1</span><h2>Add a confirmed showing</h2></div><span>Manual entry</span></div>
-      <form onSubmit={addShowing}>
-        <label>Date<select value={date} onChange={(e) => setDate(e.target.value)}>{validDates.map((value) => <option value={value} key={value}>{labelDate(value)}</option>)}</select></label>
-        <label>AMC time<input type="time" value={time} onChange={(e) => setTime(e.target.value)} required /></label>
-        <button type="submit">Save showing</button>
-      </form>
-      <p className="form-note">Only add performances labelled <b>IMAX 70mm</b> on AMC. Times stay on this device.</p>
-    </section>
+    {state === "needs_key" && <section className="setup-card"><span className="section-kicker">ONE-TIME SETUP</span><h2>Connect AMC’s official API</h2><p>The connector is built. Add an approved key to Cloudflare as the secret <code>AMC_VENDOR_KEY</code>; it stays server-side and is never sent to your browser.</p><a href={AMC_ACCESS} target="_blank" rel="noreferrer">Request AMC API access ↗</a><div className="reference"><b>Verified integration reference</b><span>AMC listing date Aug 22 · actual showtime Sun, Aug 23 at 2:00 AM · ID 145701522</span><a href={REFERENCE_URL} target="_blank" rel="noreferrer">View at AMC</a></div></section>}
 
     <section className="showings">
-      <div className="section-heading"><div><span className="section-kicker">STEP 2</span><h2>Confirmed showings</h2></div><span>{sorted.length} saved</span></div>
-      {sorted.length === 0 ? <div className="empty"><b>No showings saved yet</b><p>Start with the AMC link above. The previous sample times were removed.</p></div> : <div className="showing-list">{sorted.map((showing) => <article key={showing.id} className={selectedId === showing.id ? "showing selected" : "showing"}><button className="showing-main" onClick={() => { setSelectedId(showing.id); setSeat(null); }}><span className="showing-date">{labelDate(showing.date)}</span><strong>{labelTime(showing.time)}</strong><small>IMAX 70mm · confirmed by you</small></button><button className="delete" onClick={() => removeShowing(showing.id)} aria-label={`Remove ${labelDate(showing.date)} ${labelTime(showing.time)}`}>×</button></article>)}</div>}
+      <div className="section-heading"><div><span className="section-kicker">PERFORMANCES</span><h2>Eligible showings</h2></div><button onClick={loadShowtimes} disabled={state === "loading"}>Refresh</button></div>
+      {state === "live" && showtimes.length === 0 && <div className="empty"><b>No eligible showings found</b><p>AMC returned no IMAX 70mm performances in the tracked window.</p></div>}
+      {state !== "live" && <div className="empty"><b>Waiting for live AMC data</b><p>No substitute or fabricated showtimes are displayed.</p></div>}
+      {state === "live" && grouped.map(([date, dateShowtimes]) => <article className="day-card" key={date}><div className="day-label"><b>{listingDateLabel(date)}</b><small>AMC listing date</small></div><div className="times">{dateShowtimes.map((showtime) => { const chosen = selected?.id === showtime.id; return <button key={showtime.id} className={chosen ? "selected" : ""} onClick={() => setSelected(showtime)}><b>{timeLabel(showtime)}</b><span>{actualDateLabel(showtime)}</span>{isEarly(showtime) && <small>EARLY</small>}</button>; })}</div></article>)}
     </section>
 
     <section className="seat-panel">
-      <div className="section-heading"><div><span className="section-kicker">STEP 3</span><h2>Seat preference guide</h2></div><span className="sample-chip">NOT AVAILABILITY</span></div>
-      {selected ? <p className="map-context">For <b>{labelDate(selected.date)} · {labelTime(selected.time)}</b>. Compare these preferences against AMC’s live seat map.</p> : <p className="map-context">Select a saved showing to use this with AMC’s live seat map.</p>}
-      <div className="screen">SCREEN</div>
-      <div className="seat-map" role="grid" aria-label="Seat preference guide">{rows.map(row => <div className="seat-row" key={row}><span>{row}</span>{seatNumbers.map(n => { const id = `${row}${n}`; const excluded = row === "A" || row === "B"; const lower = row === "C"; const preferred = !excluded && !lower && n >= 5 && n <= 10; return <button key={id} disabled={!selected || excluded} onClick={() => setSeat(id)} className={`${excluded ? "avoid" : ""} ${lower ? "lower" : ""} ${preferred ? "preferred" : ""} ${seat === id ? "chosen" : ""}`} aria-label={`Row ${row}, seat ${n}`}>{n}</button>; })}</div>)}</div>
-      <div className="legend"><span><i className="preferred-dot" /> Preferred: D–J center</span><span><i className="lower-dot" /> Lower priority: C</span><span><i className="avoid-dot" /> Exclude: A–B</span></div>
-      <div className="selection">{seat ? <>Preference noted: <b>{seat}</b>. Now confirm it is available at AMC.</> : <>Availability is shown only by AMC; this map records your preference.</>}</div>
+      <div className="section-heading"><div><span className="section-kicker">LIVE AUDITORIUM</span><h2>{selected ? `${actualDateLabel(selected)} · ${timeLabel(selected)}` : "Select a showing"}</h2></div>{selected && <button onClick={() => loadSeats(selected)} disabled={seatLoading}>{seatLoading ? "Checking…" : "Refresh seats"}</button>}</div>
+      {seatMap && <div className="map-stats"><span><b>{eligibleCount}</b> eligible open</span><span><b>{newlyOpened.size}</b> newly opened</span><span>Checked {checkedLabel(seatMap.checkedAt)}</span></div>}
+      {!seatMap && <><p className="map-note">The verified Lincoln Square IMAX auditorium is 42 columns × 12 rows. Live colors appear after the AMC connection returns this performance’s seating layout.</p><ReferenceMap /></>}
+      {seatMap && <div className="map-scroll"><div className="screen" style={{ width: seatMap.columns * 14 }}>SCREEN</div><div className="seat-map" style={{ width: seatMap.columns * 14 + 26 }}>{seatRows.map((row, index) => { const label = row.find((seat) => seat.name)?.name.match(/^[A-Z]+/)?.[0] ?? ""; return <div className="map-row" key={index}><span className="row-label">{label}</span><div className="seat-grid" style={{ gridTemplateColumns: `repeat(${seatMap.columns}, 12px)` }}>{row.filter((seat) => seat.type !== "NotASeat" && seat.name).map((seat) => { const letter = rowLetter(seat); const excluded = ["A", "B"].includes(letter); const lower = letter === "C"; const preferred = preferredRows.has(letter) && Math.abs(seat.column - (seatMap.columns + 1) / 2) <= 5; const open = seat.available && seat.type === "CanReserve"; const classes = ["seat", open ? "open" : "occupied", excluded ? "excluded" : "", lower ? "lower" : "", preferred ? "preferred" : "", seat.type === "Wheelchair" || seat.type === "Companion" ? "accessible" : "", newlyOpened.has(seat.name) ? "new" : "", selectedSeat === seat.name ? "chosen" : ""].join(" "); return <button key={seat.name} style={{ gridColumn: seat.column }} className={classes} disabled={!open || excluded} onClick={() => setSelectedSeat(seat.name)} aria-label={`${seat.name}: ${open ? "available" : "occupied"}`}>{seat.name.replace(letter, "")}</button>; })}</div></div>; })}</div></div>}
+      <div className="legend"><span><i className="lg-preferred" /> Preferred center D–J</span><span><i className="lg-open" /> Eligible open</span><span><i className="lg-lower" /> Row C</span><span><i className="lg-occupied" /> Occupied</span><span><i className="lg-new" /> Newly opened</span></div>
+      {selectedSeat && <div className="seat-choice"><b>{selectedSeat}</b> is open and meets your rules. <a href={selected?.purchaseUrl ?? REFERENCE_URL} target="_blank" rel="noreferrer">Book at AMC ↗</a></div>}
     </section>
-    <footer>MANUAL CHECKING · DEVICE-LOCAL SAVED SHOWINGS · NO LIVE MONITORING</footer>
+    <footer>LIVE DATA REQUIRES APPROVED AMC VENDOR ACCESS · KEY NEVER LEAVES THE SERVER</footer>
   </main>;
+}
+
+function ReferenceMap() {
+  return <div className="map-scroll reference-map"><div className="screen" style={{ width: 42 * 14 }}>SCREEN</div><div className="seat-map" style={{ width: 42 * 14 + 26 }}>{referenceRows.map(([label, start, count]) => <div className="map-row" key={label}><span className="row-label">{label}</span><div className="seat-grid" style={{ gridTemplateColumns: "repeat(42, 12px)" }}>{Array.from({ length: count }, (_, index) => <i className="seat shell" style={{ gridColumn: start + index }} key={index} />)}</div></div>)}</div></div>;
 }
