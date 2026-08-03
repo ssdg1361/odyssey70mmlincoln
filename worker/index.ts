@@ -32,7 +32,7 @@ const TRACKED_DATES = [
 
 type Seat = { available: boolean; row: number; column: number; name: string; type: string };
 type Showtime = { id: number; performanceNumber?: number; listingDate: string; showDateTimeUtc: string; isSoldOut: boolean; purchaseUrl: string };
-type Snapshot = { version: 1; source: "normal_browser" | "cloudflare_browser_run"; checkedAt: string; showtimes: Showtime[]; seatsByShowtime: Record<string, { rows: number; columns: number; seats: Seat[]; checkedAt: string }> };
+type Snapshot = { version: 1; source: "chrome_extension" | "normal_browser" | "cloudflare_browser_run"; checkedAt: string; showtimes: Showtime[]; seatsByShowtime: Record<string, { rows: number; columns: number; seats: Seat[]; checkedAt: string }> };
 
 const worker = {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -68,13 +68,14 @@ async function writeSnapshot(request: Request, snapshot: Snapshot) {
   await caches.default.put(cacheKey(request), json(snapshot, 200, "public, max-age=604800"));
 }
 function noSnapshot() {
-  return json({ state: "no_snapshot", message: "No AMC seat snapshot has been published yet. This tracker never invents showtimes or availability.", collector: "Run the normal-browser capture, or configure the optional Cloudflare Browser Run binding." }, 503);
+  return json({ state: "no_snapshot", message: "No AMC seat snapshot has been published yet. This tracker never invents showtimes or availability.", collector: "Finish the one-time Chrome monitor setup, then it checks AMC automatically on its schedule." }, 503);
 }
 function cors(request: Request, response: Response) {
-  const origin = request.headers.get("origin");
-  if (origin === "https://www.amctheatres.com") {
+  if (request.method === "OPTIONS" || request.headers.get("origin")) {
     const headers = new Headers(response.headers);
-    headers.set("access-control-allow-origin", origin);
+    // The endpoint remains bearer-token protected. A wildcard lets the owner’s
+    // local Chrome extension publish without exposing its token to the site.
+    headers.set("access-control-allow-origin", "*");
     headers.set("access-control-allow-headers", "authorization, content-type");
     headers.set("vary", "Origin");
     return new Response(response.body, { status: response.status, headers });
@@ -115,7 +116,7 @@ async function publishSnapshot(request: Request, env: Env) {
 }
 
 function validateSnapshot(value: any): Snapshot | null {
-  if (!value || !Array.isArray(value.showtimes) || !value.seatsByShowtime || !["normal_browser", "cloudflare_browser_run"].includes(value.source)) return null;
+  if (!value || !Array.isArray(value.showtimes) || !value.seatsByShowtime || !["chrome_extension", "normal_browser", "cloudflare_browser_run"].includes(value.source)) return null;
   const showtimes = value.showtimes.filter((showtime: any) => Number.isInteger(showtime?.id) && validDate(showtime?.listingDate) && typeof showtime?.showDateTimeUtc === "string" && /^https:\/\/www\.amctheatres\.com\/showtimes\/\d+\/seats$/.test(showtime?.purchaseUrl));
   const seatsByShowtime: Snapshot["seatsByShowtime"] = {};
   for (const showtime of showtimes) {

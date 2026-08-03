@@ -126,16 +126,16 @@ export default function Home() {
     </header>
 
     <section className={`status-card ${state}`}>
-      <div><span className="status-label">AMC DATA SOURCE</span><strong>{state === "snapshot" ? "Snapshot available" : state === "loading" ? "Checking snapshot…" : state === "no_snapshot" ? "Awaiting first capture" : "Connection error"}</strong><p>{state === "snapshot" ? `${showtimes.length} eligible IMAX 70mm performance${showtimes.length === 1 ? "" : "s"} in the last ordinary-browser capture.` : message}</p></div>
+      <div><span className="status-label">AMC DATA SOURCE</span><strong>{state === "snapshot" ? "Snapshot available" : state === "loading" ? "Checking snapshot…" : state === "no_snapshot" ? "Monitor awaiting setup" : "Connection error"}</strong><p>{state === "snapshot" ? `${showtimes.length} eligible IMAX 70mm performance${showtimes.length === 1 ? "" : "s"} in the last browser-monitor check.` : message}</p></div>
       <div className="status-side"><span className="status-pill">{state === "snapshot" ? "CAPTURED" : state === "loading" ? "CHECKING" : "SETUP"}</span><small>Last captured<br />{checkedLabel(checkedAt)}</small></div>
     </section>
 
-    {state === "no_snapshot" && <section className="setup-card"><span className="section-kicker">COLLECTOR REQUIRED</span><h2>Capture from normal AMC pages</h2><p>This dashboard uses a compact snapshot captured from AMC’s ordinary public pages in a normal browser. It does not use an AMC vendor key, invent showtimes, or bypass Queue-it/CAPTCHAs. The private collector token stays only in the capture setup.</p><div className="reference"><b>Verified parsing reference</b><span>AMC listing date Aug 22 · actual start Sun, Aug 23 at 2:00 AM · ID 145701522. The map preserves AMC’s real 42 × 12 geometry.</span><a href={REFERENCE_URL} target="_blank" rel="noreferrer">View at AMC</a></div></section>}
+    {state === "no_snapshot" && <section className="setup-card"><span className="section-kicker">MONITOR REQUIRED</span><h2>Set up the desktop browser monitor</h2><p>The Chrome monitor checks AMC’s ordinary public pages automatically on a schedule using your regular browser profile. It never uses an AMC vendor key, invents showtimes, or bypasses Queue-it/CAPTCHAs. If AMC blocks a check, the monitor pauses and tells you to reopen AMC normally.</p><div className="reference"><b>Verified parsing reference</b><span>AMC listing date Aug 22 · actual start Sun, Aug 23 at 2:00 AM · ID 145701522. The map preserves AMC’s real 42 × 12 geometry.</span><a href={REFERENCE_URL} target="_blank" rel="noreferrer">View at AMC</a></div></section>}
 
     <section className="showings">
       <div className="section-heading"><div><span className="section-kicker">PERFORMANCES</span><h2>Eligible showings</h2></div><button onClick={loadShowtimes} disabled={state === "loading"}>Refresh</button></div>
       {state === "snapshot" && showtimes.length === 0 && <div className="empty"><b>No eligible showings found</b><p>The last capture contained no IMAX 70mm performances in the tracked window.</p></div>}
-      {state !== "snapshot" && <div className="empty"><b>Waiting for an AMC page capture</b><p>No substitute or fabricated showtimes are displayed.</p></div>}
+      {state !== "snapshot" && <div className="empty"><b>Waiting for the browser monitor</b><p>No substitute or fabricated showtimes are displayed.</p></div>}
       {state === "snapshot" && grouped.map(([date, dateShowtimes]) => <article className="day-card" key={date}><div className="day-label"><b>{listingDateLabel(date)}</b><small>AMC listing date</small></div><div className="times">{dateShowtimes.map((showtime) => { const chosen = selected?.id === showtime.id; return <button key={showtime.id} className={chosen ? "selected" : ""} onClick={() => setSelected(showtime)}><b>{timeLabel(showtime)}</b><span>{actualDateLabel(showtime)}</span>{isEarly(showtime) && <small>EARLY</small>}</button>; })}</div></article>)}
     </section>
 
