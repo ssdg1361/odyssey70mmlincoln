@@ -40,15 +40,10 @@ async function runMonitor() {
     // Use Chrome's isolated extension context: it can return the complete
     // snapshot to the service worker. MAIN-world injections serialize their
     // return value as an empty object in this Chrome build.
-    const [result] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: collectFromAmc, args: [DATES] });
-    const snapshot = result.result;
-    const response = await fetch(publishUrl, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${token}` }, body: JSON.stringify(snapshot) });
-    const published = await response.json();
-    if (!response.ok) {
-      const detail = published.detail ? ` [showtimes: ${published.detail.showtimesReceived}/${published.detail.validShowtimes}; maps: ${published.detail.usableSeatMaps}; source: ${published.detail.source}]` : "";
-      throw new Error((published.message || "Dashboard rejected the snapshot.") + detail);
-    }
-    await setStatus({ state: "ok", message: `Published ${published.performances} performance${published.performances === 1 ? "" : "s"}.`, checkedAt: snapshot.checkedAt });
+    const [result] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: collectFromAmc, args: [DATES, publishUrl, token] });
+    const outcome = result.result;
+    if (!outcome?.ok) throw new Error(outcome?.message || "The browser collector did not return a result.");
+    await setStatus({ state: "ok", message: `Published ${outcome.performances} performance${outcome.performances === 1 ? "" : "s"}.`, checkedAt: outcome.checkedAt });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     const accessBlocked = /^AMC_ACCESS_BLOCKED:/.test(message);
@@ -60,12 +55,12 @@ async function runMonitor() {
   } finally { if (tab?.id && !keepTabOpen) chrome.tabs.remove(tab.id).catch(() => {}); }
 }
 
-async function collectFromAmc(dates) {
+async function collectFromAmc(dates, publishUrl, token) {
   const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   const blocked = (text) => /queue-it|queueit|captcha|verify you are human|access denied/i.test(text);
   const normalise = (text) => text.replaceAll('\\"', '"').replaceAll('\\\\', '\\');
   const jsonBlock = (text, start) => { const open = text.indexOf("{", start); if (open < 0) return null; let quote = false, escape = false, depth = 0; for (let i = open; i < text.length; i += 1) { const char = text[i]; if (quote) { if (escape) escape = false; else if (char === "\\") escape = true; else if (char === '"') quote = false; continue; } if (char === '"') quote = true; else if (char === "{") depth += 1; else if (char === "}" && --depth === 0) return text.slice(open, i + 1); } return null; };
-  const fetchPage = async (url) => { const response = await fetch(url, { credentials: "include" }); const text = await response.text(); if (!response.ok) throw new Error(`AMC request failed (${response.status}).`); if (blocked(text)) throw new Error("AMC_ACCESS_BLOCKED: AMC returned an access-control page."); return text; };
+  const fetchPage = async (path) => { const url = new URL(path, "https://www.amctheatres.com").toString(); const response = await fetch(url, { credentials: "include" }); const text = await response.text(); if (!response.ok) throw new Error(`AMC request failed (${response.status}).`); if (blocked(text)) throw new Error("AMC_ACCESS_BLOCKED: AMC returned an access-control page."); return text; };
   const idsOnListing = (html) => {
     const doc = new DOMParser().parseFromString(html, "text/html");
     const ids = new Set();
@@ -83,8 +78,14 @@ async function collectFromAmc(dates) {
     return [...ids];
   };
   const parseSeatPage = (html, id) => { const text = normalise(html); const layoutText = jsonBlock(text, text.indexOf('"seatingLayout":')); if (!layoutText) throw new Error(`No seating layout for ${id}.`); const layout = JSON.parse(layoutText); const position = text.indexOf(`"showtimeId":${id}`); const around = text.slice(Math.max(0, position - 1200), position + 3500); const utc = around.match(/"showDateTimeUtc":"([^"]+)"/)?.[1]; if (!utc || !Array.isArray(layout.seats)) throw new Error(`No usable showtime data for ${id}.`); return { utc, rows: Number(layout.rows), columns: Number(layout.columns), seats: layout.seats.map((seat) => ({ available: Boolean(seat.available), row: Number(seat.row), column: Number(seat.column), name: String(seat.seatName ?? seat.name ?? ""), type: String(seat.type ?? "NotASeat") })) }; };
-  const snapshot = { version: 1, source: "chrome_extension", checkedAt: new Date().toISOString(), showtimes: [], seatsByShowtime: {} };
-  for (const listingDate of dates) { const listing = await fetchPage(`/movies/the-odyssey-76238/showtimes?date=${listingDate}`); for (const id of idsOnListing(listing)) { await wait(1400); const layout = parseSeatPage(await fetchPage(`/showtimes/${id}/seats`), id); snapshot.showtimes.push({ id: Number(id), listingDate, showDateTimeUtc: layout.utc, isSoldOut: false, purchaseUrl: `https://www.amctheatres.com/showtimes/${id}/seats` }); snapshot.seatsByShowtime[id] = { rows: layout.rows, columns: layout.columns, seats: layout.seats, checkedAt: new Date().toISOString() }; } await wait(1400); }
-  if (!snapshot.showtimes.length) throw new Error("No IMAX 70mm showtimes were found in AMC's rendered listings. No snapshot was published.");
-  snapshot.checkedAt = new Date().toISOString(); return snapshot;
+  try {
+    const snapshot = { version: 1, source: "chrome_extension", checkedAt: new Date().toISOString(), showtimes: [], seatsByShowtime: {} };
+    for (const listingDate of dates) { const listing = await fetchPage(`/movies/the-odyssey-76238/showtimes?date=${listingDate}`); for (const id of idsOnListing(listing)) { await wait(1400); const layout = parseSeatPage(await fetchPage(`/showtimes/${id}/seats`), id); snapshot.showtimes.push({ id: Number(id), listingDate, showDateTimeUtc: layout.utc, isSoldOut: false, purchaseUrl: `https://www.amctheatres.com/showtimes/${id}/seats` }); snapshot.seatsByShowtime[id] = { rows: layout.rows, columns: layout.columns, seats: layout.seats, checkedAt: new Date().toISOString() }; } await wait(1400); }
+    if (!snapshot.showtimes.length) throw new Error("No IMAX 70mm showtimes were found in AMC's rendered listings. No snapshot was published.");
+    snapshot.checkedAt = new Date().toISOString();
+    const response = await fetch(publishUrl, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${token}` }, body: JSON.stringify(snapshot) });
+    const published = await response.json();
+    if (!response.ok) { const detail = published.detail ? ` [showtimes: ${published.detail.showtimesReceived}/${published.detail.validShowtimes}; maps: ${published.detail.usableSeatMaps}; source: ${published.detail.source}]` : ""; throw new Error((published.message || "Dashboard rejected the snapshot.") + detail); }
+    return { ok: true, performances: published.performances, checkedAt: snapshot.checkedAt };
+  } catch (error) { return { ok: false, message: error instanceof Error ? error.message : String(error) }; }
 }
