@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Odyssey Seat Tracker Monitor",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "Checks AMC Lincoln Square IMAX 70mm seat maps with the user's normal browser session.",
   "permissions": ["alarms", "storage", "tabs", "scripting"],
   "host_permissions": ["https://www.amctheatres.com/*", "https://odyssey70mmlincoln.sjs05k.workers.dev/*"],

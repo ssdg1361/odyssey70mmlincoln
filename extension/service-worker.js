@@ -37,9 +37,10 @@ async function runMonitor() {
   try {
     tab = await chrome.tabs.create({ url: `https://www.amctheatres.com/movies/the-odyssey-76238/showtimes?date=${DATES[0]}`, active: false });
     if (tab.status !== "complete") await waitForTab(tab.id);
-    // MAIN world makes the requests behave like normal navigation from the
-    // user's AMC tab, rather than an extension-origin scrape.
-    const [result] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, world: "MAIN", func: collectFromAmc, args: [DATES] });
+    // Use Chrome's isolated extension context: it can return the complete
+    // snapshot to the service worker. MAIN-world injections serialize their
+    // return value as an empty object in this Chrome build.
+    const [result] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: collectFromAmc, args: [DATES] });
     const snapshot = result.result;
     const response = await fetch(publishUrl, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${token}` }, body: JSON.stringify(snapshot) });
     const published = await response.json();
@@ -64,7 +65,7 @@ async function collectFromAmc(dates) {
   const blocked = (text) => /queue-it|queueit|captcha|verify you are human|access denied/i.test(text);
   const normalise = (text) => text.replaceAll('\\"', '"').replaceAll('\\\\', '\\');
   const jsonBlock = (text, start) => { const open = text.indexOf("{", start); if (open < 0) return null; let quote = false, escape = false, depth = 0; for (let i = open; i < text.length; i += 1) { const char = text[i]; if (quote) { if (escape) escape = false; else if (char === "\\") escape = true; else if (char === '"') quote = false; continue; } if (char === '"') quote = true; else if (char === "{") depth += 1; else if (char === "}" && --depth === 0) return text.slice(open, i + 1); } return null; };
-  const fetchPage = async (url) => { const response = await fetch(url, { credentials: "same-origin" }); const text = await response.text(); if (!response.ok) throw new Error(`AMC request failed (${response.status}).`); if (blocked(text)) throw new Error("AMC_ACCESS_BLOCKED: AMC returned an access-control page."); return text; };
+  const fetchPage = async (url) => { const response = await fetch(url, { credentials: "include" }); const text = await response.text(); if (!response.ok) throw new Error(`AMC request failed (${response.status}).`); if (blocked(text)) throw new Error("AMC_ACCESS_BLOCKED: AMC returned an access-control page."); return text; };
   const idsOnListing = (html) => {
     const doc = new DOMParser().parseFromString(html, "text/html");
     const ids = new Set();
